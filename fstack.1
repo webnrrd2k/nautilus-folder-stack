@@ -1,0 +1,228 @@
+.TH FSTACK 1 "November 2026" "fstack 1.1" "User Commands"
+.SH NAME
+fstack, npush, npop, ncd, nstack, ndrop, nclear, nopen, nhere, nhelp \- push and pop folders on the Nautilus folder stack from bash
+.SH SYNOPSIS
+.B npush
+.RI [ dir ]
+.br
+.B npop
+.br
+.B ncd
+.RI [ n ]
+.br
+.B nstack
+.br
+.B ndrop
+.I n
+.br
+.B nclear
+.br
+.B nopen
+.RI [ n ]
+.br
+.B nhere
+.RI [ dir ]
+.br
+.B nhelp
+.RI [ command ]
+.PP
+.B fstack
+.RB [ push
+.RI [ dir ]
+.RB | " pop " | " peek " | " get "
+.I n
+.RB | " drop "
+.I n
+.RB | " list " | " open "
+.RI [ n ]
+.RB | " clear " | " help "
+.RI [ command ]
+.RB | " version " ]
+.SH DESCRIPTION
+The Nautilus folder stack is a list of folders that works like the shell's
+.BR pushd / popd ,
+shared between the GNOME Files app (Nautilus) and your bash prompt.
+There is only one stack.
+The
+.B folder_stack.py
+Nautilus extension shows it in the right-click
+.B "Folder Stack"
+menu and as sidebar bookmarks marked with \(lq\[u1F4CC]\(rq, which also appear
+in GTK Open and Save dialogs.
+The commands described here work on the same stack from a terminal.
+A folder pushed in either place can be popped from the other.
+.PP
+Entry 0 is the top of the stack.
+Pushing a folder that's already on the stack moves it to the top.
+Removing a \[u1F4CC] bookmark from the Nautilus sidebar also removes that folder
+from the stack.
+.PP
+The
+.B n\&...
+commands are bash functions defined in
+.IR fstack.bash .
+They exist because a program can't change its parent shell's directory, but a
+function can.
+Each one calls the
+.B fstack
+program, which you can also use directly in scripts.
+.SH SHELL COMMANDS
+.TP
+.BR npush " [\fIdir\fR]"
+Push
+.I dir
+(default: the current directory) onto the stack.
+Your shell's directory doesn't change.
+Same as
+.BR "fstack push" .
+.TP
+.B npop
+Remove the top folder from the stack and
+.B cd
+into it.
+If the stack is empty, it fails and your directory doesn't change.
+.TP
+.BR ncd " [\fIn\fR]"
+.B cd
+to entry
+.I n
+(default 0) and leave it on the stack.
+.TP
+.B nstack
+List the stack, top first, with each entry's position number.
+.TP
+.BI ndrop " n"
+Remove entry
+.IR n .
+.TP
+.B nclear
+Empty the stack.
+Bookmarks that aren't \[u1F4CC] stack bookmarks aren't touched.
+.TP
+.BR nopen " [\fIn\fR]"
+Open entry
+.I n
+(default 0) in a Nautilus window.
+.TP
+.BR nhere " [\fIdir\fR]"
+Open
+.I dir
+(default: the current directory) in Nautilus.
+.TP
+.BR nhelp " [\fIcommand\fR]"
+Show an overview of all the commands, or help for one of them.
+.PP
+Every command accepts
+.B \-h
+or
+.BR \-\-help .
+Tab completion offers folders for
+.BR npush " and " nhere ,
+and valid stack positions for
+.BR ncd ", " ndrop " and " nopen .
+.SH FSTACK SUBCOMMANDS
+Paths are printed to standard output.
+Confirmations and errors go to standard error, so command substitution
+captures only the path.
+.TP
+.BR push " [\fIdir\fR]"
+Push
+.I dir
+(default:
+.BR . ).
+.TP
+.B pop
+Remove the top entry and print its path.
+.TP
+.BR peek ", " top
+Print the top entry's path without removing it.
+.TP
+.BI get " n"
+Print entry
+.IR n 's
+path without removing it.
+.TP
+.BI drop " n"
+Remove entry
+.IR n .
+.TP
+.BR list ", " ls
+Print the numbered stack, with home-folder paths shortened to ~.
+This is the default when no subcommand is given.
+.TP
+.BR open " [\fIn\fR]"
+Open entry
+.I n
+(default 0) in Nautilus.
+.TP
+.B clear
+Empty the stack.
+.TP
+.BR help " [\fIcommand\fR]"
+Show help.
+.I command
+may be a subcommand or a shell command such as
+.BR npush .
+.TP
+.BR version ", " \-\-version
+Print the version.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+The stack was empty, there was no entry with the given number, or the
+folder doesn't exist.
+.TP
+.B 2
+Unknown command or bad usage.
+.SH FILES
+.TP
+.I ~/.local/share/nautilus-folder-stack/state.json
+The stack and folder history, shared with the Nautilus extension.
+.TP
+.I ~/.config/gtk-3.0/bookmarks
+GTK bookmarks.
+Stack entries are the lines whose label starts with \[u1F4CC].
+.TP
+.I ~/.local/share/nautilus-folder-stack/fstack.bash
+The shell functions, sourced from
+.IR ~/.bashrc .
+.TP
+.I ~/.local/share/nautilus-python/extensions/folder_stack.py
+The Nautilus extension.
+.SH ENVIRONMENT
+.TP
+.BR XDG_DATA_HOME ", " XDG_CONFIG_HOME
+If set, these replace
+.I ~/.local/share
+and
+.IR ~/.config .
+.SH EXAMPLES
+Keep a project folder handy while you work elsewhere:
+.PP
+.RS
+.nf
+cd ~/school/physics/lab-report
+npush
+cd ~/Downloads
+cp data.csv "$(fstack peek)"
+npop                      # back in lab-report
+.fi
+.RE
+.PP
+Push a folder in Nautilus (right-click \(-> Folder Stack \(-> Push This Folder),
+then pick it up in the terminal:
+.PP
+.RS
+.nf
+nstack
+ncd 0
+.fi
+.RE
+.SH SEE ALSO
+.BR nautilus (1),
+.BR bash (1)
+(see
+.BR pushd ", " popd ", " dirs )

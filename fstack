@@ -1,0 +1,370 @@
+#!/usr/bin/env python3
+"""
+fstack — push/pop folders on the Nautilus Folder Stack from a terminal.
+Run `fstack help` for usage; all help text lives in HELP below.
+"""
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.parse
+
+# Keep these in step with folder_stack.py
+SIDEBAR_PREFIX = "📌 "
+STACK_IN_SIDEBAR = True
+MAX_HISTORY_KEPT = 300
+
+_HOME = os.path.expanduser("~")
+_DATA_HOME = os.environ.get("XDG_DATA_HOME") or os.path.join(_HOME, ".local", "share")
+_CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME") or os.path.join(_HOME, ".config")
+STATE_FILE = os.path.join(_DATA_HOME, "nautilus-folder-stack", "state.json")
+BOOKMARKS_FILE = os.path.join(_CONFIG_HOME, "gtk-3.0", "bookmarks")
+
+# Same characters GLib leaves unescaped in file:// URIs, so URIs made here
+# match the ones Nautilus makes for the same folder.
+_URI_SAFE = "/!*'():@&=+$,"
+
+
+def path_to_uri(path):
+    return "file://" + urllib.parse.quote(os.path.realpath(path), safe=_URI_SAFE)
+
+
+def uri_to_path(uri):
+    if uri.startswith("file://"):
+        return urllib.parse.unquote(urllib.parse.urlsplit(uri).path) or "/"
+    return None
+
+
+def normalize(uri):
+    if uri and uri.endswith("/") and not uri.endswith(":///"):
+        uri = uri.rstrip("/")
+    return uri
+
+
+def display(uri):
+    p = uri_to_path(uri)
+    if p is None:
+        return uri
+    if p == _HOME or p.startswith(_HOME + "/"):
+        return "~" + p[len(_HOME):]
+    return p
+
+
+def short_name(uri):
+    p = uri_to_path(uri)
+    if p is None:
+        return urllib.parse.unquote(uri.rstrip("/").rsplit("/", 1)[-1]) or uri
+    return os.path.basename(p) or "/"
+
+
+def atomic_write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+class Store:
+    def __init__(self):
+        self.data = {"history": {}, "stack": []}
+        try:
+            with open(STATE_FILE, encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                self.data.update(loaded)
+        except (OSError, ValueError):
+            pass
+        self.stack = [u for u in self.data.get("stack", []) if isinstance(u, str)]
+        if not isinstance(self.data.get("history"), dict):
+            self.data["history"] = {}
+        self._reconcile_with_sidebar()
+
+    # --- sidebar bookmarks (same format as the extension) ---
+    @staticmethod
+    def _is_managed(line):
+        parts = line.split(" ", 1)
+        return len(parts) == 2 and parts[1].startswith(SIDEBAR_PREFIX)
+
+    @staticmethod
+    def _read_bookmarks():
+        try:
+            with open(BOOKMARKS_FILE, encoding="utf-8") as f:
+                return f.read().splitlines()
+        except OSError:
+            return None
+
+    def _reconcile_with_sidebar(self):
+        """A 📌 bookmark removed in the sidebar drops off the stack, as in Nautilus."""
+        if not STACK_IN_SIDEBAR or not self.stack:
+            return
+        lines = self._read_bookmarks()
+        if lines is None:
+            return
+        managed = {normalize(l.split(" ", 1)[0]) for l in lines if self._is_managed(l)}
+        new = [u for u in self.stack if u in managed]
+        if new != self.stack:
+            self.stack = new
+            self.save(sync=False)
+
+    def _sync_bookmarks(self):
+        lines = self._read_bookmarks() or []
+        kept = [l for l in lines if not self._is_managed(l)]
+        managed = [f"{uri} {SIDEBAR_PREFIX}{short_name(uri)}" for uri in self.stack]
+        new = kept + managed
+        if new != lines:
+            atomic_write(BOOKMARKS_FILE, "\n".join(new) + ("\n" if new else ""))
+
+    def save(self, sync=True):
+        self.data["stack"] = self.stack
+        atomic_write(STATE_FILE, json.dumps(self.data, indent=1))
+        if sync and STACK_IN_SIDEBAR:
+            self._sync_bookmarks()
+
+    # --- operations ---
+    def push(self, path):
+        uri = normalize(path_to_uri(path))
+        real = uri_to_path(uri)
+        # drop any existing entry for the same folder, however it was escaped
+        self.stack = [u for u in self.stack if uri_to_path(u) != real]
+        self.stack.insert(0, uri)
+        hist = self.data["history"]
+        hist[uri] = time.time()
+        if len(hist) > MAX_HISTORY_KEPT:
+            keep = sorted(hist.items(), key=lambda kv: kv[1], reverse=True)
+            self.data["history"] = dict(keep[:MAX_HISTORY_KEPT])
+        self.save()
+        return uri
+
+    def remove(self, n):
+        uri = self.stack.pop(n)
+        self.save()
+        return uri
+
+
+VERSION = "1.1"
+
+OVERVIEW = """\
+Nautilus Folder Stack: a pushd/popd-style list of folders, shared between
+the Files app (Nautilus) and your bash prompt.
+
+There is one stack. The Nautilus extension (folder_stack.py) shows it in the
+right-click menu (Folder Stack ▸) and as 📌 sidebar bookmarks, which also
+appear in Save/Open dialogs. These commands work on that same stack from a
+terminal. Entry 0 is the top of the stack.
+
+Shell commands (bash functions from fstack.bash):
+  npush [DIR]   push DIR (default: the current directory)
+  npop          pop the top folder and cd into it
+  ncd [N]       cd to entry N (default 0) without popping it
+  nstack        list the stack, top first
+  ndrop N       remove entry N
+  nclear        empty the stack
+  nopen [N]     open entry N (default 0) in Nautilus
+  nhere [DIR]   open DIR (default: the current directory) in Nautilus
+  nhelp [CMD]   show this overview, or help for one command
+
+The fstack program (the shell commands call it; use it in scripts):
+  fstack push [DIR] | pop | peek | get N | drop N | list | open [N]
+         | clear | help [CMD] | version
+
+Every command accepts -h or --help. See also: man fstack"""
+
+# name: (usage, description, same-as, related)
+HELP = {
+    "npush": ("npush [DIR]",
+        "Push DIR (default: the current directory) onto the top of the folder\n"
+        "stack. A folder that's already on the stack moves to the top instead\n"
+        "of appearing twice. It shows up right away in Nautilus's Folder Stack\n"
+        "menu and as a 📌 sidebar bookmark. Your shell's directory doesn't change.",
+        "fstack push [DIR]", "npop, ncd, nstack"),
+    "npop": ("npop",
+        "Remove the top folder from the stack and cd into it. This works the same\n"
+        "whether the folder was pushed here or in Nautilus. Fails, without\n"
+        "changing directory, if the stack is empty.",
+        "cd \"$(fstack pop)\"", "npush, ncd"),
+    "ncd": ("ncd [N]",
+        "cd to stack entry N (default 0, the top) and leave it on the stack.\n"
+        "Run nstack to see the numbers. Tab completion offers valid positions.",
+        "cd \"$(fstack get N)\"", "npop, nstack"),
+    "nstack": ("nstack",
+        "List the stack, top first, with each entry's position number.",
+        "fstack list", "ncd, ndrop"),
+    "ndrop": ("ndrop N",
+        "Remove entry N from the stack (and its 📌 bookmark) without going there.",
+        "fstack drop N", "nstack, nclear"),
+    "nclear": ("nclear",
+        "Remove every folder from the stack, along with their 📌 sidebar bookmarks.\n"
+        "Your other bookmarks aren't touched.",
+        "fstack clear", "ndrop"),
+    "nopen": ("nopen [N]",
+        "Open stack entry N (default 0, the top) in a Nautilus window. The\n"
+        "stack doesn't change.",
+        "fstack open [N]", "nhere, nstack"),
+    "nhere": ("nhere [DIR]",
+        "Open DIR (default: the current directory) in Nautilus. Handy for\n"
+        "going from the terminal to the file manager. To keep the folder\n"
+        "for later, npush it too.",
+        "nautilus DIR", "nopen, npush"),
+    "nhelp": ("nhelp [CMD]",
+        "With no argument, show how the whole set of commands fits together.\n"
+        "With CMD, show help for that one command.",
+        "fstack help [CMD]", "every command also takes --help"),
+    "push": ("fstack push [DIR]",
+        "Push DIR (default: .) onto the stack and print a confirmation to stderr.\n"
+        "A folder already on the stack moves to the top.",
+        None, "npush"),
+    "pop": ("fstack pop",
+        "Remove the top entry and print its path to stdout. A program can't\n"
+        "change its parent shell's directory, so npop does: cd \"$(fstack pop)\".",
+        None, "npop, peek"),
+    "peek": ("fstack peek   (also: fstack top)",
+        "Print the top entry's path without removing it. Example:\n"
+        "  cp report.pdf \"$(fstack peek)\"",
+        None, "get, pop"),
+    "get": ("fstack get N",
+        "Print the path of entry N (0 = top) without removing it.",
+        None, "ncd, peek"),
+    "drop": ("fstack drop N",
+        "Remove entry N from the stack.",
+        None, "ndrop"),
+    "list": ("fstack list   (also: fstack ls, or just fstack)",
+        "Print the stack, top first, as numbered lines. Paths under your home\n"
+        "folder are shown with ~. For exact paths in scripts, use fstack get N.",
+        None, "nstack"),
+    "open": ("fstack open [N]",
+        "Open entry N (default 0) in Nautilus.",
+        None, "nopen"),
+    "clear": ("fstack clear",
+        "Empty the stack and remove its 📌 sidebar bookmarks.",
+        None, "nclear"),
+    "help": ("fstack help [CMD]",
+        "Show the overview, or help for CMD. CMD can be an fstack subcommand\n"
+        "(push, pop, ...) or a shell command (npush, npop, ...).",
+        None, "nhelp"),
+    "version": ("fstack version",
+        "Print the version number.", None, None),
+}
+ALIASES = {"top": "peek", "ls": "list"}
+
+
+def help_text(topic=None):
+    if not topic:
+        return OVERVIEW
+    topic = ALIASES.get(topic, topic)
+    if topic not in HELP:
+        die(f"no help for {topic!r}; commands are: " + ", ".join(HELP), 2)
+    usage, desc, same, related = HELP[topic]
+    out = [f"Usage: {usage}", "", desc]
+    if same or related:
+        out.append("")
+    if same:
+        out.append(f"Same as: {same}")
+    if related:
+        out += [f"Related: {related}"]
+    out += ["", "Run `nhelp` (or `fstack help`) to see how all the commands fit together."]
+    return "\n".join(out)
+
+
+def die(msg, code=1):
+    print(f"fstack: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def index_arg(args, store, default=0):
+    if not args:
+        n = default
+    else:
+        try:
+            n = int(args[0])
+        except ValueError:
+            die(f"not a stack position: {args[0]!r}")
+    if not store.stack:
+        die("stack is empty")
+    if not 0 <= n < len(store.stack):
+        die(f"no entry {n} (stack has {len(store.stack)}: 0..{len(store.stack) - 1})")
+    return n
+
+
+def local_path_or_die(uri):
+    p = uri_to_path(uri)
+    if p is None:
+        die(f"not a local folder: {uri}")
+    return p
+
+
+def main(argv):
+    cmd, args = (argv[0], argv[1:]) if argv else ("list", [])
+    if cmd in ("-h", "--help"):
+        print(help_text())
+        return
+    if cmd == "help":
+        print(help_text(args[0] if args else None))
+        return
+    if cmd in ("-V", "--version", "version"):
+        print(f"fstack {VERSION}")
+        return
+    if "-h" in args or "--help" in args:
+        print(help_text(cmd if ALIASES.get(cmd, cmd) in HELP else None))
+        return
+    store = Store()
+
+    if cmd == "push":
+        target = args[0] if args else "."
+        if not os.path.isdir(target):
+            die(f"not a directory: {target}")
+        uri = store.push(target)
+        print(f"pushed {display(uri)}  ({len(store.stack)} on stack)", file=sys.stderr)
+
+    elif cmd == "pop":
+        if not store.stack:
+            die("stack is empty")
+        print(local_path_or_die(store.remove(0)))
+
+    elif cmd in ("peek", "top"):
+        if not store.stack:
+            die("stack is empty")
+        print(local_path_or_die(store.stack[0]))
+
+    elif cmd == "get":
+        print(local_path_or_die(store.stack[index_arg(args, store)]))
+
+    elif cmd == "drop":
+        uri = store.remove(index_arg(args, store))
+        print(f"dropped {display(uri)}", file=sys.stderr)
+
+    elif cmd in ("list", "ls"):
+        if not store.stack:
+            print("(stack is empty)", file=sys.stderr)
+        for i, uri in enumerate(store.stack):
+            print(f"{i:2}  {display(uri)}")
+
+    elif cmd == "open":
+        uri = store.stack[index_arg(args, store)]
+        try:
+            subprocess.Popen(["nautilus", uri], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError:
+            subprocess.Popen(["xdg-open", uri], start_new_session=True)
+
+    elif cmd == "clear":
+        store.stack = []
+        store.save()
+        print("stack cleared", file=sys.stderr)
+
+    else:
+        die(f"unknown command {cmd!r} (try: fstack help)", 2)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
